@@ -1,0 +1,10 @@
+{
+  "name": "PDF Toolkit Pro",
+  "short_name": "PDF Toolkit",
+  "description": "All-in-one PDF tool - Free & Private",
+  "start_url": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#f0f2f5",
+  "theme_color": "#667eea"
+}
