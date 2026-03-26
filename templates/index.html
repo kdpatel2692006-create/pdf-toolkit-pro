@@ -235,17 +235,21 @@ const blob=await r.blob();const disp=r.headers.get("Content-Disposition")||"";le
 function showStatus(msg,loading=false,isErr=false){const bar=document.getElementById("statusBar"),fill=document.getElementById("progressFill"),text=document.getElementById("statusText");bar.classList.add("active");text.textContent=msg;text.className=isErr?"error":(loading?"":"success");if(loading){fill.style.width="0%";fill.classList.add("indeterminate");fill.style.background="linear-gradient(90deg,#667eea,#764ba2)";}else{fill.classList.remove("indeterminate");fill.style.width="100%";fill.style.background=isErr?"#e74c3c":"linear-gradient(90deg,#27ae60,#2ecc71)";setTimeout(()=>bar.classList.remove("active"),4000);}}
 
 /* ═══════════════════════════════════════════════════
-   PDF EDITOR — Rebuilt based on Adobe Acrobat / iLovePDF patterns
+   PDF EDITOR — Fixed: selection, properties, text
    ═══════════════════════════════════════════════════ */
 let edSessionId=null,edCurrentPage=0,edTotalPages=0;
 let edAnnotations=[],edSelectedId=null,edTool="select";
-let edActiveInput=null; // Currently active text input on canvas
-let edMouseAction=null; // "dragging" or "drawing"
+let edActiveInput=null;
+let edMouseAction=null;
 let edStartX=0,edStartY=0,edOffX=0,edOffY=0;
 let edFreePoints=[];
 const canvas=document.getElementById("editorCanvas");
 const ctx=canvas.getContext("2d");
 const bgImg=document.getElementById("editorBg");
+
+/* Temp canvas for accurate text measurement */
+const _measureCanvas=document.createElement("canvas");
+const _measureCtx=_measureCanvas.getContext("2d");
 
 async function initEditor(){
   const f=uploadedFiles[0];if(!f)return;
@@ -270,8 +274,8 @@ async function edLoadPage(){
     canvas.style.width=bgImg.clientWidth+"px";canvas.style.height=bgImg.clientHeight+"px";
     edRedraw();
   };
-  bgImg.src=`/api/editor/page/${edSessionId}/${edCurrentPage}`;
-  document.getElementById("edPageInfo").textContent=`Page ${edCurrentPage+1}/${edTotalPages}`;
+  bgImg.src="/api/editor/page/"+edSessionId+"/"+edCurrentPage;
+  document.getElementById("edPageInfo").textContent="Page "+(edCurrentPage+1)+"/"+edTotalPages;
   document.getElementById("edPrevBtn").disabled=edCurrentPage<=0;
   document.getElementById("edNextBtn").disabled=edCurrentPage>=edTotalPages-1;
 }
@@ -293,72 +297,66 @@ function getPos(e){
   return{x:(e.clientX-r.left)*(canvas.width/r.width),y:(e.clientY-r.top)*(canvas.height/r.height)};
 }
 
-/* ── Accurate bounding boxes ── */
+/* ── Accurate bounding boxes using temp canvas ── */
 function getBounds(a){
   if(a.type==="text"){
-    ctx.save();ctx.font=`${a.fontSize||16}px ${a.fontFamily||"Helvetica"}`;
-    const w=Math.max(ctx.measureText(a.text||"M").width,30);ctx.restore();
-    const h=(a.fontSize||16)*1.2;
+    _measureCtx.font=(a.fontSize||16)+"px "+(a.fontFamily||"Helvetica");
+    const w=Math.max(_measureCtx.measureText(a.text||"M").width,40);
+    const h=(a.fontSize||16)*1.3;
     return{x:a.x,y:a.y-(a.fontSize||16),w:w,h:h};
   }
   if(a.type==="freehand"&&a.points&&a.points.length){
     let x1=Infinity,y1=Infinity,x2=-Infinity,y2=-Infinity;
-    a.points.forEach(p=>{x1=Math.min(x1,p[0]);y1=Math.min(y1,p[1]);x2=Math.max(x2,p[0]);y2=Math.max(y2,p[1]);});
+    a.points.forEach(function(p){x1=Math.min(x1,p[0]);y1=Math.min(y1,p[1]);x2=Math.max(x2,p[0]);y2=Math.max(y2,p[1]);});
     return{x:x1,y:y1,w:Math.max(x2-x1,10),h:Math.max(y2-y1,10)};
   }
   return{x:a.x,y:a.y,w:a.width||100,h:a.height||50};
 }
 
-function hitTest(a,x,y){const b=getBounds(a);const pad=12;return x>=b.x-pad&&x<=b.x+b.w+pad&&y>=b.y-pad&&y<=b.y+b.h+pad;}
+function hitTest(a,x,y){var b=getBounds(a);var pad=12;return x>=b.x-pad&&x<=b.x+b.w+pad&&y>=b.y-pad&&y<=b.y+b.h+pad;}
 
-/* ── Text input system ── */
+/* ── Text input on canvas ── */
 function showTextInput(cx,cy,existingText,existingAnn){
   finalizeActiveText();
-  const container=document.getElementById("canvasContainer");
-  const rect=canvas.getBoundingClientRect();
-  const sx=rect.width/canvas.width,sy=rect.height/canvas.height;
-  const fs=parseInt(document.getElementById("epFontSize").value)||18;
-  const ff=document.getElementById("epFont").value;
-  const col=document.getElementById("epColor").value;
+  var container=document.getElementById("canvasContainer");
+  var rect=canvas.getBoundingClientRect();
+  var sx=rect.width/canvas.width,sy=rect.height/canvas.height;
+  var fs=parseInt(document.getElementById("epFontSize").value)||18;
+  var ff=document.getElementById("epFont").value;
+  var col=document.getElementById("epColor").value;
 
-  const inp=document.createElement("input");inp.type="text";inp.className="ed-text-input";
+  var inp=document.createElement("input");inp.type="text";inp.className="ed-text-input";
   inp.style.left=(cx*sx)+"px";inp.style.top=((cy-fs)*sy)+"px";
   inp.style.fontSize=(fs*Math.min(sx,sy))+"px";inp.style.fontFamily=ff;inp.style.color=col;
   inp.value=existingText||"";inp.placeholder="Type here, press Enter...";
 
-  // Store metadata
   inp._cx=cx;inp._cy=cy;inp._fs=fs;inp._ff=ff;inp._col=col;
   inp._editingId=existingAnn?existingAnn.id:null;
 
-  // CRITICAL: prevent canvas from stealing clicks on this input
-  inp.addEventListener("mousedown",e=>e.stopPropagation());
-  inp.addEventListener("pointerdown",e=>e.stopPropagation());
-  inp.addEventListener("touchstart",e=>e.stopPropagation());
-
-  inp.addEventListener("keydown",e=>{
+  inp.addEventListener("mousedown",function(e){e.stopPropagation();});
+  inp.addEventListener("pointerdown",function(e){e.stopPropagation();});
+  inp.addEventListener("touchstart",function(e){e.stopPropagation();});
+  inp.addEventListener("keydown",function(e){
     if(e.key==="Enter"){e.preventDefault();finalizeActiveText();}
     if(e.key==="Escape"){cancelActiveText();}
   });
 
   container.appendChild(inp);edActiveInput=inp;
-  requestAnimationFrame(()=>{inp.focus();inp.select();});
+  requestAnimationFrame(function(){inp.focus();inp.select();});
 }
 
 function finalizeActiveText(){
   if(!edActiveInput)return;
-  const text=edActiveInput.value.trim();
-  const editId=edActiveInput._editingId;
-
+  var text=edActiveInput.value.trim();
+  var editId=edActiveInput._editingId;
   if(text){
     if(editId){
-      // Update existing annotation
-      const a=edAnnotations.find(a=>a.id===editId);
+      var a=edAnnotations.find(function(ann){return ann.id===editId;});
       if(a){a.text=text;a.fontSize=edActiveInput._fs;a.fontFamily=edActiveInput._ff;a.color=edActiveInput._col;edSelectedId=a.id;}
     }else{
-      // Create new annotation
-      const id=Date.now()+Math.random();
-      edAnnotations.push({id,type:"text",page:edCurrentPage,x:edActiveInput._cx,y:edActiveInput._cy,
-        text,fontSize:edActiveInput._fs,fontFamily:edActiveInput._ff,color:edActiveInput._col});
+      var id=Date.now()+Math.random();
+      edAnnotations.push({id:id,type:"text",page:edCurrentPage,x:edActiveInput._cx,y:edActiveInput._cy,
+        text:text,fontSize:edActiveInput._fs,fontFamily:edActiveInput._ff,color:edActiveInput._col});
       edSelectedId=id;
     }
     document.getElementById("epText").value=text;
@@ -368,35 +366,42 @@ function finalizeActiveText(){
 
 function cancelActiveText(){if(!edActiveInput)return;edActiveInput.remove();edActiveInput=null;}
 
-/* ── Canvas mouse events ── */
-canvas.addEventListener("mousedown",e=>{
+/* ── Canvas mouse events — FIXED: doesn't deselect when clicking properties ── */
+canvas.addEventListener("mousedown",function(e){
+  /* Only respond to clicks directly on the canvas element */
+  if(e.target!==canvas)return;
+
   if(edActiveInput){finalizeActiveText();}
-  const p=getPos(e);
+  var p=getPos(e);
 
   if(edTool==="select"){
-    edSelectedId=null;
-    const pa=edAnnotations.filter(a=>a.page===edCurrentPage);
-    for(let i=pa.length-1;i>=0;i--){
+    var foundId=null;
+    var pa=edAnnotations.filter(function(a){return a.page===edCurrentPage;});
+    for(var i=pa.length-1;i>=0;i--){
       if(hitTest(pa[i],p.x,p.y)){
-        edSelectedId=pa[i].id;loadProps(pa[i]);
-        const b=getBounds(pa[i]);
+        foundId=pa[i].id;
+        loadProps(pa[i]);
+        var b=getBounds(pa[i]);
         edOffX=p.x-b.x;edOffY=p.y-b.y;
-        edMouseAction="dragging";break;
+        edMouseAction="dragging";
+        break;
       }
     }
-    edRedraw();return;
+    edSelectedId=foundId;
+    edRedraw();
+    return;
   }
   if(edTool==="text"){showTextInput(p.x,p.y);return;}
   edMouseAction="drawing";edStartX=p.x;edStartY=p.y;
   if(edTool==="freehand")edFreePoints=[{x:p.x,y:p.y}];
 });
 
-canvas.addEventListener("mousemove",e=>{
-  if(!edMouseAction)return;const p=getPos(e);
+canvas.addEventListener("mousemove",function(e){
+  if(!edMouseAction)return;var p=getPos(e);
   if(edMouseAction==="dragging"&&edSelectedId){
-    const a=edAnnotations.find(a=>a.id===edSelectedId);if(!a)return;
+    var a=edAnnotations.find(function(ann){return ann.id===edSelectedId;});if(!a)return;
     if(a.type==="text"){a.x=p.x-edOffX;a.y=p.y-edOffY+(a.fontSize||16);}
-    else if(a.type==="freehand"){const b=getBounds(a);const dx=p.x-edOffX-b.x;const dy=p.y-edOffY-b.y;a.points=a.points.map(pt=>[pt[0]+dx,pt[1]+dy]);edOffX=p.x-getBounds(a).x;edOffY=p.y-getBounds(a).y;}
+    else if(a.type==="freehand"){var b=getBounds(a);var dx=p.x-edOffX-b.x;var dy=p.y-edOffY-b.y;a.points=a.points.map(function(pt){return[pt[0]+dx,pt[1]+dy];});edOffX=p.x-getBounds(a).x;edOffY=p.y-getBounds(a).y;}
     else{a.x=p.x-edOffX;a.y=p.y-edOffY;}
     edRedraw();return;
   }
@@ -404,45 +409,44 @@ canvas.addEventListener("mousemove",e=>{
     edRedraw();ctx.save();ctx.strokeStyle=document.getElementById("epColor").value;ctx.lineWidth=parseInt(document.getElementById("epLineWidth").value)||2;
     if(edTool==="rect")ctx.strokeRect(edStartX,edStartY,p.x-edStartX,p.y-edStartY);
     else if(edTool==="circle"){ctx.beginPath();ctx.ellipse((edStartX+p.x)/2,(edStartY+p.y)/2,Math.abs(p.x-edStartX)/2||1,Math.abs(p.y-edStartY)/2||1,0,0,Math.PI*2);ctx.stroke();}
-    else if(edTool==="freehand"){edFreePoints.push({x:p.x,y:p.y});ctx.beginPath();ctx.moveTo(edFreePoints[0].x,edFreePoints[0].y);edFreePoints.forEach(pt=>ctx.lineTo(pt.x,pt.y));ctx.stroke();}
+    else if(edTool==="freehand"){edFreePoints.push({x:p.x,y:p.y});ctx.beginPath();ctx.moveTo(edFreePoints[0].x,edFreePoints[0].y);edFreePoints.forEach(function(pt){ctx.lineTo(pt.x,pt.y);});ctx.stroke();}
     ctx.restore();
   }
 });
 
-canvas.addEventListener("mouseup",e=>{
+canvas.addEventListener("mouseup",function(e){
   if(edMouseAction!=="drawing"){edMouseAction=null;return;}
-  edMouseAction=null;const p=getPos(e);
-  const color=document.getElementById("epColor").value;
-  const fill=document.getElementById("epNoFill").checked?"":document.getElementById("epFill").value;
-  const lw=parseInt(document.getElementById("epLineWidth").value)||2;
-  const id=Date.now()+Math.random();
+  edMouseAction=null;var p=getPos(e);
+  var color=document.getElementById("epColor").value;
+  var fill=document.getElementById("epNoFill").checked?"":document.getElementById("epFill").value;
+  var lw=parseInt(document.getElementById("epLineWidth").value)||2;
+  var id=Date.now()+Math.random();
   if(edTool==="rect"&&(Math.abs(p.x-edStartX)>5||Math.abs(p.y-edStartY)>5)){
-    edAnnotations.push({id,type:"rect",page:edCurrentPage,x:Math.min(edStartX,p.x),y:Math.min(edStartY,p.y),width:Math.abs(p.x-edStartX),height:Math.abs(p.y-edStartY),color,fill,lineWidth:lw});edSelectedId=id;
+    edAnnotations.push({id:id,type:"rect",page:edCurrentPage,x:Math.min(edStartX,p.x),y:Math.min(edStartY,p.y),width:Math.abs(p.x-edStartX),height:Math.abs(p.y-edStartY),color:color,fill:fill,lineWidth:lw});edSelectedId=id;
   }else if(edTool==="circle"&&(Math.abs(p.x-edStartX)>5||Math.abs(p.y-edStartY)>5)){
-    edAnnotations.push({id,type:"circle",page:edCurrentPage,x:Math.min(edStartX,p.x),y:Math.min(edStartY,p.y),width:Math.abs(p.x-edStartX),height:Math.abs(p.y-edStartY),color,fill,lineWidth:lw});edSelectedId=id;
+    edAnnotations.push({id:id,type:"circle",page:edCurrentPage,x:Math.min(edStartX,p.x),y:Math.min(edStartY,p.y),width:Math.abs(p.x-edStartX),height:Math.abs(p.y-edStartY),color:color,fill:fill,lineWidth:lw});edSelectedId=id;
   }else if(edTool==="freehand"&&edFreePoints.length>2){
-    edAnnotations.push({id,type:"freehand",page:edCurrentPage,points:edFreePoints.map(pt=>[pt.x,pt.y]),color,lineWidth:lw});edSelectedId=id;
+    edAnnotations.push({id:id,type:"freehand",page:edCurrentPage,points:edFreePoints.map(function(pt){return[pt.x,pt.y];}),color:color,lineWidth:lw});edSelectedId=id;
   }
   edRedraw();
 });
 
 /* Double-click to re-edit text */
-canvas.addEventListener("dblclick",e=>{
-  const p=getPos(e);
-  const pa=edAnnotations.filter(a=>a.page===edCurrentPage&&a.type==="text");
-  for(let i=pa.length-1;i>=0;i--){
+canvas.addEventListener("dblclick",function(e){
+  var p=getPos(e);
+  var pa=edAnnotations.filter(function(a){return a.page===edCurrentPage&&a.type==="text";});
+  for(var i=pa.length-1;i>=0;i--){
     if(hitTest(pa[i],p.x,p.y)){
-      const ann=pa[i];
-      showTextInput(ann.x,ann.y,ann.text,ann);
+      showTextInput(pa[i].x,pa[i].y,pa[i].text,pa[i]);
       return;
     }
   }
 });
 
 /* Keyboard: Delete and Escape */
-document.addEventListener("keydown",e=>{
-  if(edActiveInput)return; // Don't interfere with text input
-  const tag=document.activeElement?.tagName;
+document.addEventListener("keydown",function(e){
+  if(edActiveInput)return;
+  var tag=document.activeElement?document.activeElement.tagName:"";
   if(tag==="INPUT"||tag==="TEXTAREA"||tag==="SELECT")return;
   if(edSelectedId&&(e.key==="Delete"||e.key==="Backspace")){edDeleteSelected();e.preventDefault();}
   if(e.key==="Escape"){edSelectedId=null;edRedraw();}
@@ -451,10 +455,11 @@ document.addEventListener("keydown",e=>{
 /* ── Redraw ── */
 function edRedraw(){
   ctx.clearRect(0,0,canvas.width,canvas.height);
-  edAnnotations.filter(a=>a.page===edCurrentPage).forEach(a=>{
+  var pageAnns=edAnnotations.filter(function(a){return a.page===edCurrentPage;});
+  pageAnns.forEach(function(a){
     ctx.save();
     if(a.type==="text"){
-      ctx.font=`${a.fontSize||16}px ${a.fontFamily||"Helvetica"}`;
+      ctx.font=(a.fontSize||16)+"px "+(a.fontFamily||"Helvetica");
       ctx.fillStyle=a.color||"#000";ctx.fillText(a.text||"",a.x,a.y);
     }else if(a.type==="rect"){
       if(a.fill){ctx.fillStyle=a.fill;ctx.fillRect(a.x,a.y,a.width,a.height);}
@@ -464,70 +469,103 @@ function edRedraw(){
       if(a.fill){ctx.fillStyle=a.fill;ctx.fill();}ctx.strokeStyle=a.color||"#000";ctx.lineWidth=a.lineWidth||2;ctx.stroke();
     }else if(a.type==="freehand"&&a.points&&a.points.length>1){
       ctx.strokeStyle=a.color||"#000";ctx.lineWidth=a.lineWidth||2;ctx.lineCap="round";ctx.lineJoin="round";
-      ctx.beginPath();ctx.moveTo(a.points[0][0],a.points[0][1]);a.points.forEach(p=>ctx.lineTo(p[0],p[1]));ctx.stroke();
+      ctx.beginPath();ctx.moveTo(a.points[0][0],a.points[0][1]);a.points.forEach(function(p){ctx.lineTo(p[0],p[1]);});ctx.stroke();
     }else if(a.type==="image"&&a._imgEl){ctx.drawImage(a._imgEl,a.x,a.y,a.width,a.height);}
-    // Selection indicator
+    /* Selection indicator with corner handles */
     if(a.id===edSelectedId){
-      const b=getBounds(a);ctx.strokeStyle="#667eea";ctx.lineWidth=2;ctx.setLineDash([6,4]);
+      var b=getBounds(a);ctx.strokeStyle="#667eea";ctx.lineWidth=2;ctx.setLineDash([6,4]);
       ctx.strokeRect(b.x-6,b.y-6,b.w+12,b.h+12);ctx.setLineDash([]);
-      ctx.fillStyle="#667eea";const hs=8;
-      [[b.x-6,b.y-6],[b.x+b.w-2,b.y-6],[b.x-6,b.y+b.h-2],[b.x+b.w-2,b.y+b.h-2]].forEach(h=>ctx.fillRect(h[0],h[1],hs,hs));
+      ctx.fillStyle="#667eea";var hs=8;
+      [[b.x-6,b.y-6],[b.x+b.w-2,b.y-6],[b.x-6,b.y+b.h-2],[b.x+b.w-2,b.y+b.h-2]].forEach(function(h){ctx.fillRect(h[0],h[1],hs,hs);});
     }
     ctx.restore();
   });
 }
 
+/* ── Load properties into panel when annotation selected ── */
 function loadProps(a){
   if(a.fontFamily)document.getElementById("epFont").value=a.fontFamily;
   if(a.fontSize)document.getElementById("epFontSize").value=a.fontSize;
   if(a.color)document.getElementById("epColor").value=a.color;
-  if(a.fill){document.getElementById("epFill").value=a.fill;document.getElementById("epNoFill").checked=false;}else document.getElementById("epNoFill").checked=true;
+  if(a.fill){document.getElementById("epFill").value=a.fill;document.getElementById("epNoFill").checked=false;}
+  else{document.getElementById("epNoFill").checked=true;}
   if(a.lineWidth)document.getElementById("epLineWidth").value=a.lineWidth;
   if(a.text!==undefined)document.getElementById("epText").value=a.text;
 }
 
+/* ── FIXED: Update properties — works even when clicking panel inputs ── */
 function epUpdate(){
   if(!edSelectedId)return;
-  const a=edAnnotations.find(a=>a.id===edSelectedId);if(!a)return;
-  a.fontFamily=document.getElementById("epFont").value;
-  a.fontSize=parseInt(document.getElementById("epFontSize").value)||16;
-  a.color=document.getElementById("epColor").value;
-  a.fill=document.getElementById("epNoFill").checked?"":document.getElementById("epFill").value;
-  a.lineWidth=parseInt(document.getElementById("epLineWidth").value)||2;
-  if(a.type==="text")a.text=document.getElementById("epText").value;
+  var a=edAnnotations.find(function(ann){return ann.id===edSelectedId;});
+  if(!a)return;
+
+  /* Read all current values from the panel */
+  var newFont=document.getElementById("epFont").value;
+  var newSize=parseInt(document.getElementById("epFontSize").value)||16;
+  var newColor=document.getElementById("epColor").value;
+  var newFill=document.getElementById("epNoFill").checked?"":document.getElementById("epFill").value;
+  var newLw=parseInt(document.getElementById("epLineWidth").value)||2;
+
+  /* Apply to annotation */
+  a.fontFamily=newFont;
+  a.fontSize=newSize;
+  a.color=newColor;
+  a.fill=newFill;
+  a.lineWidth=newLw;
+
+  if(a.type==="text"){
+    var textVal=document.getElementById("epText").value;
+    if(textVal!==undefined)a.text=textVal;
+  }
+
   edRedraw();
 }
 
-function edDeleteSelected(){if(!edSelectedId)return;edAnnotations=edAnnotations.filter(a=>a.id!==edSelectedId);edSelectedId=null;edRedraw();}
-function edUndo(){const pa=edAnnotations.filter(a=>a.page===edCurrentPage);if(!pa.length)return;edAnnotations=edAnnotations.filter(a=>a.id!==pa[pa.length-1].id);edSelectedId=null;edRedraw();}
+function edDeleteSelected(){if(!edSelectedId)return;edAnnotations=edAnnotations.filter(function(a){return a.id!==edSelectedId;});edSelectedId=null;edRedraw();}
+
+function edUndo(){var pa=edAnnotations.filter(function(a){return a.page===edCurrentPage;});if(!pa.length)return;var last=pa[pa.length-1];edAnnotations=edAnnotations.filter(function(a){return a.id!==last.id;});if(edSelectedId===last.id)edSelectedId=null;edRedraw();}
 
 function edInsertImage(){document.getElementById("edImgInput").click();}
-document.getElementById("edImgInput").addEventListener("change",function(){const file=this.files[0];if(!file)return;const reader=new FileReader();reader.onload=function(e){const img=new window.Image();img.onload=function(){const id=Date.now()+Math.random();const w=Math.min(img.width,canvas.width/3);edAnnotations.push({id,type:"image",page:edCurrentPage,x:50,y:50,width:w,height:w*(img.height/img.width),imageData:e.target.result,_imgEl:img});edSelectedId=id;edRedraw();};img.src=e.target.result;};reader.readAsDataURL(file);this.value="";});
+document.getElementById("edImgInput").addEventListener("change",function(){
+  var file=this.files[0];if(!file)return;
+  var reader=new FileReader();
+  reader.onload=function(e){
+    var img=new window.Image();
+    img.onload=function(){
+      var id=Date.now()+Math.random();
+      var w=Math.min(img.width,canvas.width/3);
+      edAnnotations.push({id:id,type:"image",page:edCurrentPage,x:50,y:50,width:w,height:w*(img.height/img.width),imageData:e.target.result,_imgEl:img});
+      edSelectedId=id;edRedraw();
+    };
+    img.src=e.target.result;
+  };
+  reader.readAsDataURL(file);this.value="";
+});
 
 async function edSave(){
   if(!edSessionId){showStatus("❌ No session",false,true);return;}
   finalizeActiveText();showStatus("Saving…",true);
-  const anns=edAnnotations.map(a=>{const c={...a};delete c._imgEl;delete c.id;return c;});
+  var anns=edAnnotations.map(function(a){var c=Object.assign({},a);delete c._imgEl;delete c.id;return c;});
   try{
-    const r=await fetch("/api/editor/save",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({session_id:edSessionId,annotations:anns})});
-    if(!r.ok){showStatus("❌ "+((await r.json()).error||"Failed"),false,true);return;}
-    const u=URL.createObjectURL(await r.blob());const a=document.createElement("a");a.href=u;a.download="edited.pdf";document.body.appendChild(a);a.click();document.body.removeChild(a);URL.revokeObjectURL(u);showStatus("✅ Saved!",false,false);
+    var r=await fetch("/api/editor/save",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({session_id:edSessionId,annotations:anns})});
+    if(!r.ok){var errData=await r.json();showStatus("❌ "+(errData.error||"Failed"),false,true);return;}
+    var u=URL.createObjectURL(await r.blob());var a=document.createElement("a");a.href=u;a.download="edited.pdf";document.body.appendChild(a);a.click();document.body.removeChild(a);URL.revokeObjectURL(u);showStatus("✅ Saved!",false,false);
   }catch(e){showStatus("❌ "+e.message,false,true);}
 }
 
 /* ═══ DELETE PAGES ═══ */
 let delSessionId=null,delTotalPages=0;const delSelected=new Set();
-async function initDeletePages(){const f=uploadedFiles[0];if(!f)return;showStatus("Loading pages…",true);const fd=new FormData();fd.append("file",f);
-try{const r=await fetch("/api/delete-pages/upload",{method:"POST",body:fd});const d=await r.json();if(d.error){showStatus("❌ "+d.error,false,true);return;}
+async function initDeletePages(){var f=uploadedFiles[0];if(!f)return;showStatus("Loading pages…",true);var fd=new FormData();fd.append("file",f);
+try{var r=await fetch("/api/delete-pages/upload",{method:"POST",body:fd});var d=await r.json();if(d.error){showStatus("❌ "+d.error,false,true);return;}
 delSessionId=d.session_id;delTotalPages=d.pages;delSelected.clear();document.getElementById("normalView").style.display="none";document.getElementById("deleteView").classList.add("active");
-const grid=document.getElementById("deleteGrid");grid.innerHTML="";
-for(let i=0;i<delTotalPages;i++){const div=document.createElement("div");div.className="del-page";div.id=`delp_${i}`;div.onclick=()=>toggleDel(i);div.innerHTML=`<img src="/api/delete-pages/thumb/${delSessionId}/${i}" alt="Page ${i+1}" loading="lazy"><div class="dp-x">✕</div><div class="dp-num">Page ${i+1}</div>`;grid.appendChild(div);}
+var grid=document.getElementById("deleteGrid");grid.innerHTML="";
+for(var i=0;i<delTotalPages;i++){var div=document.createElement("div");div.className="del-page";div.id="delp_"+i;div.setAttribute("data-idx",i);div.onclick=function(){toggleDel(parseInt(this.getAttribute("data-idx")));};div.innerHTML='<img src="/api/delete-pages/thumb/'+delSessionId+'/'+i+'" alt="Page '+(i+1)+'" loading="lazy"><div class="dp-x">✕</div><div class="dp-num">Page '+(i+1)+'</div>';grid.appendChild(div);}
 updateDelUI();showStatus("Click pages to select for deletion",false,false);}catch(e){showStatus("❌ "+e.message,false,true);}}
-function toggleDel(i){if(delSelected.has(i+1))delSelected.delete(i+1);else delSelected.add(i+1);document.getElementById(`delp_${i}`).classList.toggle("selected");updateDelUI();}
-function updateDelUI(){document.getElementById("delCount").textContent=`${delSelected.size} page${delSelected.size!==1?'s':''} selected`;document.getElementById("delProcessBtn").disabled=delSelected.size===0||delSelected.size>=delTotalPages;if(delSelected.size>=delTotalPages)document.getElementById("delCount").textContent="Cannot delete ALL pages!";}
+function toggleDel(i){if(delSelected.has(i+1))delSelected.delete(i+1);else delSelected.add(i+1);document.getElementById("delp_"+i).classList.toggle("selected");updateDelUI();}
+function updateDelUI(){document.getElementById("delCount").textContent=delSelected.size+" page"+(delSelected.size!==1?"s":"")+" selected";document.getElementById("delProcessBtn").disabled=delSelected.size===0||delSelected.size>=delTotalPages;if(delSelected.size>=delTotalPages)document.getElementById("delCount").textContent="Cannot delete ALL pages!";}
 async function delProcess(){if(!delSessionId||delSelected.size===0)return;showStatus("Deleting…",true);
-try{const r=await fetch("/api/delete-pages/process",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({session_id:delSessionId,pages_to_delete:Array.from(delSelected)})});
-if(!r.ok){showStatus("❌ "+((await r.json()).error||"Failed"),false,true);return;}const u=URL.createObjectURL(await r.blob());const a=document.createElement("a");a.href=u;a.download="pages_deleted.pdf";document.body.appendChild(a);a.click();document.body.removeChild(a);URL.revokeObjectURL(u);showStatus("✅ Done!",false,false);}catch(e){showStatus("❌ "+e.message,false,true);}}
+try{var r=await fetch("/api/delete-pages/process",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({session_id:delSessionId,pages_to_delete:Array.from(delSelected)})});
+if(!r.ok){var errData=await r.json();showStatus("❌ "+(errData.error||"Failed"),false,true);return;}var u=URL.createObjectURL(await r.blob());var a=document.createElement("a");a.href=u;a.download="pages_deleted.pdf";document.body.appendChild(a);a.click();document.body.removeChild(a);URL.revokeObjectURL(u);showStatus("✅ Done!",false,false);}catch(e){showStatus("❌ "+e.message,false,true);}}
 </script>
 </body>
 </html>

@@ -8,7 +8,12 @@ from flask import (Flask, request, jsonify, send_file,
 from werkzeug.utils import secure_filename
 from pdf_engine import PDFEngine
 
-app = Flask(__name__)
+app = Flask(__name__)# Speed: Compress responses for faster Android loading
+try:
+    from flask_compress import Compress
+    Compress(app)
+except ImportError:
+    pass  # Works without it too
 app.secret_key = os.environ.get("SECRET_KEY", "pdf-toolkit-pro-local-2025")
 APP_PASSWORD = os.environ.get("APP_PASSWORD", "")
 

@@ -7,3 +7,4 @@ openpyxl>=3.1.0
 python-pptx>=0.6.21
 pytesseract>=0.3.10
 Pillow>=10.0.0
+flask-compress>=1.13
